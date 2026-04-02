@@ -1,6 +1,6 @@
 import asyncio
 import os
-import google.generativeai as genai
+import openai
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -10,17 +10,14 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-1.5-flash")
-
+openai.api_key = OPENAI_API_KEY
 mode = "ai"  # ai / human
 
-# CRM-подібне зберігання клієнтів
 clients = {}  # client_id -> {"last_msg": str, "name": str}
 
 # --- СТАРТ ---
@@ -48,7 +45,6 @@ async def ai(message: types.Message):
 async def handler(message: types.Message):
     user_id = message.from_user.id
 
-    # --- КЛІЄНТ ---
     if user_id != ADMIN_ID:
         clients[user_id] = {"last_msg": message.text, "name": message.from_user.full_name}
 
@@ -63,11 +59,13 @@ async def handler(message: types.Message):
             reply_markup=keyboard
         )
 
-        # ШІ відповідає якщо режим ai
-        if mode == "ai":
-            try:
-                response = model.generate_content(f"""
-Ти — професійний менеджер з продажу студії дизайну інтер’єру Interdesign (https://interdesign.com.ua/).
+       # --- ШІ відповідає якщо режим ai
+if mode == "ai":
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": """Ти — професійний менеджер з продажу студії дизайну інтер’єру Interdesign (https://interdesign.com.ua/).
 
 Твоя задача — не просто відповідати, а ПРОДАВАТИ послуги та переводити клієнта в дію (заявка / дзвінок / консультація).
 
@@ -113,16 +111,19 @@ async def handler(message: types.Message):
 - з питанням в кінці (щоб вести діалог)
 
 Приклад:
-"Підкажіть, будь ласка, це квартира чи будинок і яка приблизно площа? Зможемо зорієнтувати вас по вартості та запропонувати оптимальне рішення 👍"
-
-Клієнт: {message.text}
-""")
-                await bot.send_message(user_id, response.text)
-            except Exception as e:
-                # повідомлення клієнту
-                await bot.send_message(user_id, "Менеджер зараз зв'яжеться з вами 📞")
-                # повідомлення адміну з логом помилки
-                await bot.send_message(ADMIN_ID, f"❌ ШІ не спрацював для {message.from_user.full_name} ({user_id})\nПомилка: {e}")
+'Підкажіть, будь ласка, це квартира чи будинок і яка приблизно площа? Зможемо зорієнтувати вас по вартості та запропонувати оптимальне рішення 👍'
+"""}, 
+                {"role": "user", "content": message.text}
+            ],
+            max_tokens=300
+        )
+        reply_text = response.choices[0].message.content
+        await bot.send_message(user_id, reply_text)
+    except Exception as e:
+        # повідомлення клієнту
+        await bot.send_message(user_id, "Менеджер зараз зв'яжеться з вами 📞")
+        # повідомлення адміну з логом помилки
+        await bot.send_message(ADMIN_ID, f"❌ ШІ не спрацював для {message.from_user.full_name} ({user_id})\nПомилка: {e}")
 
 # --- CALLBACK для кнопок ---
 @dp.callback_query()
@@ -132,7 +133,6 @@ async def callback_handler(callback: types.CallbackQuery):
         client_id = int(data.split("_")[1])
         if client_id in clients:
             await callback.message.answer(f"Відповідь на клієнта {clients[client_id]['name']} (нажми тут і пиши текст)")
-            # зберігаємо id клієнта, якого будемо відповісти
             clients["reply_to"] = client_id
         else:
             await callback.message.answer("Клієнт не знайдений 😢")
