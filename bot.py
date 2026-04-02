@@ -119,8 +119,10 @@ async def handler(message: types.Message):
 """)
                 await bot.send_message(user_id, response.text)
             except Exception as e:
-                await bot.send_message(user_id, "Помилка відповіді 😢")
-                print("GEMINI ERROR:", e)
+                # повідомлення клієнту
+                await bot.send_message(user_id, "Менеджер зараз зв'яжеться з вами 📞")
+                # повідомлення адміну з логом помилки
+                await bot.send_message(ADMIN_ID, f"❌ ШІ не спрацював для {message.from_user.full_name} ({user_id})\nПомилка: {e}")
 
 # --- CALLBACK для кнопок ---
 @dp.callback_query()
