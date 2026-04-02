@@ -1,24 +1,26 @@
-import asyncio
 import os
-import openai
+import asyncio
+import requests
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from dotenv import load_dotenv
 
+# --- ЗАВАНТАЖЕННЯ ENV ---
 load_dotenv()
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+HF_API_KEY = os.getenv("HF_API_KEY")
+HF_MODEL = os.getenv("HF_MODEL", "gpt2")  # Можна обрати іншу модель
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-openai.api_key = OPENAI_API_KEY
 mode = "ai"  # ai / human
-
 clients = {}  # client_id -> {"last_msg": str, "name": str}
+
+HEADERS = {"Authorization": f"Bearer {HF_API_KEY}"}
+API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
 
 # --- СТАРТ ---
 @dp.message(Command("start"))
@@ -34,38 +36,61 @@ async def human(message: types.Message):
         await message.answer("Режим: ти відповідаєш")
 
 @dp.message(Command("ai"))
-async def ai(message: types.Message):
+async def ai_mode(message: types.Message):
     global mode
     if message.from_user.id == ADMIN_ID:
         mode = "ai"
         await message.answer("Режим: ШІ відповідає")
 
-# --- КЛІЄНТ ПИШЕ ---
+# --- ФУНКЦІЯ ДЛЯ HUGGING FACE ---
+def query_hf(prompt: str):
+    payload = {"inputs": prompt, "options": {"wait_for_model": True}}
+    try:
+        response = requests.post(API_URL, headers=HEADERS, json=payload, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        # Hugging Face нові моделі можуть повертати list з 'generated_text'
+        if isinstance(data, list) and "generated_text" in data[0]:
+            return data[0]["generated_text"]
+        elif isinstance(data, dict) and "error" in data:
+            return None
+        return str(data)
+    except Exception as e:
+        return None
+
+# --- ГОЛОВНИЙ ХЕНДЛЕР ---
 @dp.message()
-async def handler(message: types.Message):
+async def main_handler(message: types.Message):
     user_id = message.from_user.id
 
-    if user_id != ADMIN_ID:
-        clients[user_id] = {"last_msg": message.text, "name": message.from_user.full_name}
+    if user_id == ADMIN_ID:
+        # --- АДМІН ПИШЕ ---
+        if "reply_to" in clients:
+            client_id = clients["reply_to"]
+            await bot.send_message(client_id, message.text)
+            await message.answer(f"Відправлено клієнту {clients[client_id]['name']} ✅")
+            del clients["reply_to"]
+        else:
+            await message.answer("Натисни кнопку 'Відповісти' на клієнта перед відправкою")
+        return
 
-        # кнопка для адміна: відповісти
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Відповісти", callback_data=f"reply_{user_id}")]
-        ])
+    # --- КЛІЄНТ ПИШЕ ---
+    clients[user_id] = {"last_msg": message.text, "name": message.from_user.full_name}
 
-        await bot.send_message(
-            ADMIN_ID,
-            f"👤 Клієнт: {message.from_user.full_name}\n\n{message.text}",
-            reply_markup=keyboard
-        )
+    # Кнопка для адміна відповісти
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Відповісти", callback_data=f"reply_{user_id}")]
+    ])
+    await bot.send_message(
+        ADMIN_ID,
+        f"👤 Клієнт: {message.from_user.full_name}\n\n{message.text}",
+        reply_markup=keyboard
+    )
 
-       # --- ШІ відповідає якщо режим ai
-if mode == "ai":
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": """Ти — професійний менеджер з продажу студії дизайну інтер’єру Interdesign (https://interdesign.com.ua/).
+    # ШІ відповідає якщо режим ai
+    if mode == "ai":
+        # Твій промт Interdesign
+        prompt = f"""Ти — професійний менеджер з продажу студії дизайну інтер’єру Interdesign (https://interdesign.com.ua/).
 
 Твоя задача — не просто відповідати, а ПРОДАВАТИ послуги та переводити клієнта в дію (заявка / дзвінок / консультація).
 
@@ -110,20 +135,15 @@ if mode == "ai":
 - по суті
 - з питанням в кінці (щоб вести діалог)
 
-Приклад:
-'Підкажіть, будь ласка, це квартира чи будинок і яка приблизно площа? Зможемо зорієнтувати вас по вартості та запропонувати оптимальне рішення 👍'
-"""}, 
-                {"role": "user", "content": message.text}
-            ],
-            max_tokens=300
-        )
-        reply_text = response.choices[0].message.content
-        await bot.send_message(user_id, reply_text)
-    except Exception as e:
-        # повідомлення клієнту
-        await bot.send_message(user_id, "Менеджер зараз зв'яжеться з вами 📞")
-        # повідомлення адміну з логом помилки
-        await bot.send_message(ADMIN_ID, f"❌ ШІ не спрацював для {message.from_user.full_name} ({user_id})\nПомилка: {e}")
+Питання клієнта: {message.text}
+"""
+
+        reply_text = query_hf(prompt)
+        if reply_text:
+            await bot.send_message(user_id, reply_text)
+        else:
+            await bot.send_message(user_id, "Менеджер зараз зв'яжеться з вами 📞")
+            await bot.send_message(ADMIN_ID, f"❌ Hugging Face не відповів для {message.from_user.full_name} ({user_id})")
 
 # --- CALLBACK для кнопок ---
 @dp.callback_query()
@@ -132,22 +152,10 @@ async def callback_handler(callback: types.CallbackQuery):
     if data.startswith("reply_") and callback.from_user.id == ADMIN_ID:
         client_id = int(data.split("_")[1])
         if client_id in clients:
-            await callback.message.answer(f"Відповідь на клієнта {clients[client_id]['name']} (нажми тут і пиши текст)")
+            await callback.message.answer(f"Відповідь на клієнта {clients[client_id]['name']} (тут напишіть текст, він відправиться клієнту)")
             clients["reply_to"] = client_id
         else:
             await callback.message.answer("Клієнт не знайдений 😢")
-
-# --- АДМІН ПИШЕ ---
-@dp.message()
-async def admin_message(message: types.Message):
-    if message.from_user.id == ADMIN_ID:
-        if "reply_to" in clients:
-            client_id = clients["reply_to"]
-            await bot.send_message(client_id, message.text)
-            await message.answer(f"Відправлено клієнту {clients[client_id]['name']} ✅")
-            del clients["reply_to"]
-        else:
-            await message.answer("Натисни кнопку 'Відповісти' на клієнта перед відправкою")
 
 # --- ЗАПУСК ---
 async def main():
